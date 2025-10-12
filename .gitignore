@@ -1,0 +1,5 @@
+# Ignore environment files and credentials
+.env
+.streamlit
+mystic-castle-452716-r3-06468c3f2be8.json
+
