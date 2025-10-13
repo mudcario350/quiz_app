@@ -325,11 +325,55 @@ Student's new question: {user_question}
 
 Please provide a helpful, encouraging response that addresses their question and provides guidance for improvement. Be supportive and constructive.
 Respond in a conversational tone, as if you're having a one-on-one tutoring session."""
-    } 
+    }
+
+
+def get_orchestration_text() -> Dict[str, str]:
+    """Get orchestration instructions for different agent types."""
+    return {
+        "grading_evaluation": """You are an AI assistant helping with educational assessment. Follow these instructions carefully:
+
+1. USE THE DATA: The <data> section contains all relevant information about the assignment, questions, answers, and previous interactions. Use this data to provide context-aware feedback.
+
+2. FOLLOW THE INSTRUCTIONS: The <instructions> section contains specific guidance on how to approach this task. Follow these instructions precisely.
+
+3. VARIABLE NUMBER OF QUESTIONS: This assignment may have anywhere from 1 to 25 questions. The <output_format> section will show the exact structure needed for this specific assignment. Pay attention to which question numbers are required.
+
+4. OUTPUT FORMAT (CRITICAL): Regardless of what the instructions say, you MUST respond with ONLY valid JSON in the exact format specified in the <output_format> section. Include ALL fields shown in the output format - no more, no less. Do not include any explanatory text, markdown formatting, or additional content outside the JSON structure. Your entire response should be parseable as JSON.""",
+        
+        "conversation": """You are an AI teaching assistant helping a student understand their assignment feedback. Follow these instructions carefully:
+
+1. USE THE DATA: The <data> section contains all relevant information about the assignment, questions, answers, grading feedback, and conversation history. Use this data to provide context-aware, personalized responses.
+
+2. FOLLOW THE INSTRUCTIONS: The <instructions> section contains specific guidance on how to interact with students. Follow these instructions precisely.
+
+3. BE HELPFUL AND SUPPORTIVE: Provide clear, encouraging guidance that helps the student improve their understanding. Reference specific parts of their answers and feedback when relevant."""
+    }
+
+
+def get_grading_output_format(question_num: int) -> str:
+    """Get the required JSON output format for grading a single question."""
+    return f"""{{
+    "score{question_num}": <integer from 0-10>,
+    "feedback{question_num}": "<detailed feedback string>"
+}}"""
+
+
+def get_evaluation_output_format(num_questions: int) -> str:
+    """Get the required JSON output format for evaluation of multiple questions."""
+    fields = []
+    for i in range(1, num_questions + 1):
+        fields.append(f'    "new_score{i}": <integer from 0-10>,')
+        fields.append(f'    "new_feedback{i}": "<enhanced feedback string>"{"," if i < num_questions else ""}')
+    
+    return "{\n" + "\n".join(fields) + "\n}" 
 # ===========================
 # Main Application (from source_app.py)
 # ===========================
 
+    PromptManager, get_default_prompts, get_orchestration_text,
+    get_grading_output_format, get_evaluation_output_format
+)
 
 # Page config must be first
 st.set_page_config(page_title='Dynamic AI Assignment', layout='centered')
@@ -1332,6 +1376,9 @@ def build_conversation_metadata(all_questions: Dict[str, str], all_answers: Dict
     return "\n".join(metadata_parts)
 
 
+# Orchestration text is now imported from prompt_manager
+
+
 def run_grading_streaming(exec_id: str, sid: str, aid: str, answers: Dict[str, str]) -> Dict[str, Any]:
     """True parallel grading - all API calls made simultaneously. Supports variable number of questions (1-25)."""
     try:
@@ -1384,8 +1431,26 @@ def run_grading_streaming(exec_id: str, sid: str, aid: str, answers: Dict[str, s
                 previous_scores=previous_feedback if previous_feedback else None
             )
             
-            # Wrap metadata in <data> tags and prepend to prompt
-            question_prompt = f"<data>\n{metadata}\n</data>\n\n{prompt_template}"
+            # Build the structured prompt with admin orchestration
+            orchestration_texts = get_orchestration_text()
+            admin_section = orchestration_texts["grading_evaluation"]
+            output_format = get_grading_output_format(q_num)
+            
+            question_prompt = f"""<data>
+{metadata}
+</data>
+
+<admin>
+{admin_section}
+</admin>
+
+<output_format>
+{output_format}
+</output_format>
+
+<instructions>
+{prompt_template}
+</instructions>"""
             
             prompts.append((q_num, question_prompt))
         
@@ -1430,6 +1495,7 @@ def run_grading_streaming(exec_id: str, sid: str, aid: str, answers: Dict[str, s
             "execution_id": exec_id,
             "assignment_id": aid,
             "student_id": sid,
+            "timestamp": datetime.datetime.now().isoformat(sep=' ', timespec='seconds')
         }
         
         # Initialize all possible scores and feedback to empty/0
@@ -1458,6 +1524,7 @@ def run_grading_streaming(exec_id: str, sid: str, aid: str, answers: Dict[str, s
             "execution_id": exec_id,
             "assignment_id": aid,
             "student_id": sid,
+            "timestamp": datetime.datetime.now().isoformat(sep=' ', timespec='seconds')
         }
         for i in range(1, 26):
             error_result[f"score{i}"] = 5
@@ -1584,8 +1651,29 @@ def run_evaluation_streaming(grade_res: Dict[str, Any]) -> Dict[str, Any]:
             current_scores=current_scores
         )
         
-        # Wrap metadata in <data> tags and prepend to prompt
-        prompt = f"<data>\n{metadata}\n</data>\n\n{prompt_template}"
+        # Determine number of questions for output format
+        num_questions = len(all_questions)
+        
+        # Build the structured prompt with admin orchestration
+        orchestration_texts = get_orchestration_text()
+        admin_section = orchestration_texts["grading_evaluation"]
+        output_format = get_evaluation_output_format(num_questions)
+        
+        prompt = f"""<data>
+{metadata}
+</data>
+
+<admin>
+{admin_section}
+</admin>
+
+<output_format>
+{output_format}
+</output_format>
+
+<instructions>
+{prompt_template}
+</instructions>"""
 
         # Use streaming for faster response
         response_text = ""
@@ -1622,19 +1710,18 @@ def run_evaluation_streaming(grade_res: Dict[str, Any]) -> Dict[str, Any]:
             result = {
                 "execution_id": grade_res.get('execution_id', ''),
                 "student_id": grade_res.get('student_id', ''),
-                "new_score1": grade_res.get('score1', 0),
-                "new_score2": grade_res.get('score2', 0),
-                "new_score3": grade_res.get('score3', 0),
-                "new_feedback1": grade_res.get('feedback1', ''),
-                "new_feedback2": grade_res.get('feedback2', ''),
-                "new_feedback3": grade_res.get('feedback3', '')
             }
+            
+            # Dynamically populate fallback for all questions in the assignment
+            for i in range(1, num_questions + 1):
+                result[f"new_score{i}"] = grade_res.get(f'score{i}', 0)
+                result[f"new_feedback{i}"] = grade_res.get(f'feedback{i}', '')
             
             # Try to extract individual feedback fields from the response text
             try:
                 import re
-                # Look for new_feedback1, new_feedback2, new_feedback3 patterns
-                for i in range(1, 4):
+                # Look for new_feedback patterns for all questions dynamically
+                for i in range(1, num_questions + 1):
                     feedback_pattern = rf'"new_feedback{i}":\s*"([^"]*)"'
                     score_pattern = rf'"new_score{i}":\s*(\d+)'
                     
@@ -1650,13 +1737,41 @@ def run_evaluation_streaming(grade_res: Dict[str, Any]) -> Dict[str, Any]:
                 print(f"[WARNING] Manual extraction failed: {e}")
                 # Keep the original feedback as fallback
         
-        print("[DEBUG] run_evaluation_streaming extracted:", result)
-        return result
+        # Ensure all required fields are present for sheet writing
+        complete_result = {
+            "execution_id": grade_res.get('execution_id', ''),
+            "assignment_id": grade_res.get('assignment_id', ''),
+            "student_id": grade_res.get('student_id', ''),
+            "timestamp": datetime.datetime.now().isoformat(sep=' ', timespec='seconds')
+        }
+        
+        # Initialize all possible new_score and new_feedback fields to empty/0
+        for i in range(1, 26):
+            complete_result[f"new_score{i}"] = 0
+            complete_result[f"new_feedback{i}"] = ""
+        
+        # Fill in actual results from LLM response
+        for key, value in result.items():
+            if key.startswith(('new_score', 'new_feedback')):
+                complete_result[key] = value
+        
+        print("[DEBUG] run_evaluation_streaming complete result:", {k: v for k, v in complete_result.items() if v and k.startswith('new_')})
+        return complete_result
         
     except Exception as e:
         print(f"[ERROR] run_evaluation_streaming failed: {e}")
         st.error(f"Evaluation failed: {e}")
-        return {}
+        # Return error result with all required fields
+        error_result = {
+            "execution_id": grade_res.get('execution_id', ''),
+            "assignment_id": grade_res.get('assignment_id', ''),
+            "student_id": grade_res.get('student_id', ''),
+            "timestamp": datetime.datetime.now().isoformat(sep=' ', timespec='seconds')
+        }
+        for i in range(1, 26):
+            error_result[f"new_score{i}"] = 0
+            error_result[f"new_feedback{i}"] = "Evaluation error"
+        return error_result
 
 
 def run_evaluation(grade_res: Dict[str, Any]) -> Dict[str, Any]:
@@ -1726,9 +1841,22 @@ def run_conversation_streaming(exec_id: str, sid: str, user_msg: str) -> Dict[st
             conversation_history=conversation_history if conversation_history else None
         )
         
-        # Wrap metadata in <data> tags and prepend to prompt
-        # Also include the user's current question
-        prompt = f"<data>\n{metadata}\n<current_student_question>{user_msg}</current_student_question>\n</data>\n\n{prompt_template}"
+        # Build the structured prompt with conversation orchestration
+        orchestration_texts = get_orchestration_text()
+        admin_section = orchestration_texts["conversation"]
+        
+        prompt = f"""<data>
+{metadata}
+<current_student_question>{user_msg}</current_student_question>
+</data>
+
+<admin>
+{admin_section}
+</admin>
+
+<instructions>
+{prompt_template}
+</instructions>"""
 
         # Use streaming for faster response
         response_text = ""
