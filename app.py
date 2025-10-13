@@ -1806,6 +1806,23 @@ def main() -> None:
             st.session_state['exec_id'] = str(uuid.uuid4())
         exec_id = st.session_state['exec_id']
         
+        # Get active questions from assignment record
+        active_questions = qrec.get('active_questions', {})
+        num_questions = qrec.get('num_questions', 0)
+        
+        # Store active_questions in session state for use by agents
+        st.session_state['active_questions'] = active_questions
+        
+        print(f"[DEBUG] Active questions in main loop: {list(active_questions.keys())}")
+        print(f"[DEBUG] Number of questions: {num_questions}")
+        
+        # Initialize assignment session with new memory system FIRST (before loading data)
+        if not assignment_memory.current_state:
+            assignment_memory.initialize_assignment_session(exec_id, sid, aid, active_questions)
+            print(f"[MEMORY] Initialized new assignment session for student {sid} with {num_questions} questions")
+        else:
+            print(f"[MEMORY] Using existing assignment session for student {sid}")
+        
         # Check if assignment has been started and load previous session data if needed
         started_status = sa.get('started', 'FALSE').upper()
         has_previous_data = False
@@ -1823,28 +1840,12 @@ def main() -> None:
                 print(f"[SESSION RESTORE] Found previous data for student {sid}, assignment {aid}")
                 
                 # Load all previous session data into memory (only once per session)
+                # This now works because assignment_memory.current_state is initialized above
                 if not st.session_state.get('memory_loaded', False):
                     load_session_data_into_memory(sid, aid)
                     st.session_state['memory_loaded'] = True
         else:
             print(f"[SESSION] Assignment not started yet (started={started_status}) - loading fresh form")
-        
-        # Get active questions from assignment record
-        active_questions = qrec.get('active_questions', {})
-        num_questions = qrec.get('num_questions', 0)
-        
-        # Store active_questions in session state for use by agents
-        st.session_state['active_questions'] = active_questions
-        
-        print(f"[DEBUG] Active questions in main loop: {list(active_questions.keys())}")
-        print(f"[DEBUG] Number of questions: {num_questions}")
-        
-        # Initialize assignment session with new memory system
-        if not assignment_memory.current_state:
-            assignment_memory.initialize_assignment_session(exec_id, sid, aid, active_questions)
-            print(f"[MEMORY] Initialized new assignment session for student {sid} with {num_questions} questions")
-        else:
-            print(f"[MEMORY] Using existing assignment session for student {sid}")
         
         # Initialize question caches with question text (backward compatibility) - dynamic based on active questions
         for q_key, q_text in active_questions.items():
