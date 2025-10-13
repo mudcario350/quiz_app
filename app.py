@@ -210,7 +210,8 @@ class PromptManager:
             # Map prompt type to column name
             column_map = {
                 "grading": "GradingPrompt",
-                "conversation": "ConversationPrompt"
+                "conversation": "ConversationPrompt",
+                "evaluation": "EnhancedFeedbackPrompt"
             }
             
             column_name = column_map.get(prompt_type)
@@ -498,7 +499,7 @@ class AssignmentsSheet(Sheet):
     def __init__(self, client):
         # Support up to 25 questions
         question_columns = [f"Question{i}" for i in range(1, 26)]
-        headers = ["date", "assignment_id"] + question_columns + ["GradingPrompt", "ConversationPrompt"]
+        headers = ["date", "assignment_id"] + question_columns + ["GradingPrompt", "ConversationPrompt", "EnhancedFeedbackPrompt"]
         super().__init__(client, "assignments", headers)
 
     def fetch(self, assignment_id: str) -> dict[str, Any]:
@@ -1194,12 +1195,151 @@ def record_answers(exec_id: str, sid: str, aid: str, answers: dict[str, str]) ->
 
 # Removed grade_single_question function - now using _make_single_api_call for true parallelism
 
+# --- Metadata Builder Functions ---
+
+def build_grading_metadata(question_num: int, question_text: str, answer: str, all_questions: Dict[str, str], 
+                          all_answers: Dict[str, str], previous_feedbacks: Dict[str, str] = None, 
+                          previous_scores: Dict[str, int] = None) -> str:
+    """Build metadata block for grading agent (per-question)."""
+    metadata_parts = []
+    
+    # All questions
+    metadata_parts.append("<all_questions>")
+    for q_key, q_text in sorted(all_questions.items()):
+        q_num = q_key.replace('q', '')
+        metadata_parts.append(f"  <question_{q_num}>{q_text}</question_{q_num}>")
+    metadata_parts.append("</all_questions>")
+    
+    # Current question being graded
+    metadata_parts.append(f"<current_question_number>{question_num}</current_question_number>")
+    metadata_parts.append(f"<current_question_text>{question_text}</current_question_text>")
+    metadata_parts.append(f"<current_answer>{answer}</current_answer>")
+    
+    # All current answers
+    metadata_parts.append("<all_current_answers>")
+    for q_key, ans in sorted(all_answers.items()):
+        if ans.strip():
+            q_num = q_key.replace('q', '')
+            metadata_parts.append(f"  <answer_{q_num}>{ans}</answer_{q_num}>")
+    metadata_parts.append("</all_current_answers>")
+    
+    # Previous feedbacks and scores (if any)
+    if previous_feedbacks or previous_scores:
+        metadata_parts.append("<previous_grading>")
+        for q_key in sorted(all_questions.keys()):
+            q_num = q_key.replace('q', '')
+            feedback = previous_feedbacks.get(f"feedback{q_num}", "") if previous_feedbacks else ""
+            score = previous_scores.get(f"score{q_num}", "") if previous_scores else ""
+            if feedback or score:
+                metadata_parts.append(f"  <previous_q{q_num}>")
+                if score:
+                    metadata_parts.append(f"    <score>{score}</score>")
+                if feedback:
+                    metadata_parts.append(f"    <feedback>{feedback}</feedback>")
+                metadata_parts.append(f"  </previous_q{q_num}>")
+        metadata_parts.append("</previous_grading>")
+    
+    return "\n".join(metadata_parts)
+
+
+def build_evaluation_metadata(all_questions: Dict[str, str], all_answers: Dict[str, str], 
+                              current_feedbacks: Dict[str, str], current_scores: Dict[str, int]) -> str:
+    """Build metadata block for evaluation agent (all questions)."""
+    metadata_parts = []
+    
+    # All questions
+    metadata_parts.append("<all_questions>")
+    for q_key, q_text in sorted(all_questions.items()):
+        q_num = q_key.replace('q', '')
+        metadata_parts.append(f"  <question_{q_num}>{q_text}</question_{q_num}>")
+    metadata_parts.append("</all_questions>")
+    
+    # All current answers
+    metadata_parts.append("<all_current_answers>")
+    for q_key, ans in sorted(all_answers.items()):
+        if ans.strip():
+            q_num = q_key.replace('q', '')
+            metadata_parts.append(f"  <answer_{q_num}>{ans}</answer_{q_num}>")
+    metadata_parts.append("</all_current_answers>")
+    
+    # Current feedbacks and scores
+    metadata_parts.append("<current_grading>")
+    for q_key in sorted(all_questions.keys()):
+        q_num = q_key.replace('q', '')
+        feedback = current_feedbacks.get(f"feedback{q_num}", "")
+        score = current_scores.get(f"score{q_num}", "")
+        if feedback or score:
+            metadata_parts.append(f"  <grading_q{q_num}>")
+            if score:
+                metadata_parts.append(f"    <score>{score}</score>")
+            if feedback:
+                metadata_parts.append(f"    <feedback>{feedback}</feedback>")
+            metadata_parts.append(f"  </grading_q{q_num}>")
+    metadata_parts.append("</current_grading>")
+    
+    return "\n".join(metadata_parts)
+
+
+def build_conversation_metadata(all_questions: Dict[str, str], all_answers: Dict[str, str], 
+                                current_feedbacks: Dict[str, str] = None, current_scores: Dict[str, int] = None,
+                                conversation_history: List = None) -> str:
+    """Build metadata block for conversation agent (with conversation history)."""
+    metadata_parts = []
+    
+    # All questions
+    metadata_parts.append("<all_questions>")
+    for q_key, q_text in sorted(all_questions.items()):
+        q_num = q_key.replace('q', '')
+        metadata_parts.append(f"  <question_{q_num}>{q_text}</question_{q_num}>")
+    metadata_parts.append("</all_questions>")
+    
+    # All current answers
+    metadata_parts.append("<all_current_answers>")
+    for q_key, ans in sorted(all_answers.items()):
+        if ans.strip():
+            q_num = q_key.replace('q', '')
+            metadata_parts.append(f"  <answer_{q_num}>{ans}</answer_{q_num}>")
+    metadata_parts.append("</all_current_answers>")
+    
+    # Current feedbacks and scores (if any)
+    if current_feedbacks or current_scores:
+        metadata_parts.append("<current_grading>")
+        for q_key in sorted(all_questions.keys()):
+            q_num = q_key.replace('q', '')
+            feedback = current_feedbacks.get(f"feedback{q_num}", "") if current_feedbacks else ""
+            score = current_scores.get(f"score{q_num}", "") if current_scores else ""
+            if feedback or score:
+                metadata_parts.append(f"  <grading_q{q_num}>")
+                if score:
+                    metadata_parts.append(f"    <score>{score}</score>")
+                if feedback:
+                    metadata_parts.append(f"    <feedback>{feedback}</feedback>")
+                metadata_parts.append(f"  </grading_q{q_num}>")
+        metadata_parts.append("</current_grading>")
+    
+    # Conversation history
+    if conversation_history:
+        metadata_parts.append("<conversation_history>")
+        conv_num = 1
+        for msg in conversation_history:
+            if isinstance(msg, HumanMessage):
+                metadata_parts.append(f"  <student_message_{conv_num}>{msg.content}</student_message_{conv_num}>")
+            elif isinstance(msg, AIMessage):
+                metadata_parts.append(f"  <ai_message_{conv_num}>{msg.content}</ai_message_{conv_num}>")
+                conv_num += 1
+        metadata_parts.append("</conversation_history>")
+    
+    return "\n".join(metadata_parts)
+
 
 def run_grading_streaming(exec_id: str, sid: str, aid: str, answers: Dict[str, str]) -> Dict[str, Any]:
     """True parallel grading - all API calls made simultaneously. Supports variable number of questions (1-25)."""
     try:
-        # Get conversation context once
-        conversation_context = context_cache.get_conversation_context()
+        # Get active questions from session state
+        all_questions = st.session_state.get('active_questions', {})
+        
+        # Get previous feedback from session state (if any)
+        previous_feedback = st.session_state.get('feedback', {})
         
         # Determine which questions to grade based on provided answers
         questions_to_grade = []
@@ -1220,7 +1360,7 @@ def run_grading_streaming(exec_id: str, sid: str, aid: str, answers: Dict[str, s
             print(f"[DEBUG] No prompt found in sheet for assignment {aid}, using default grading prompt")
             prompt_template = get_default_prompts()["grading_prompt"]
         else:
-            print(f"[DEBUG] Using grading prompt from sheet for assignment {aid}")
+            print(f"[DEBUG] Using custom grading prompt from sheet for assignment {aid}")
         
         # Print the actual prompt template being used
         print(f"[DEBUG] ===== GRADING PROMPT TEMPLATE =====")
@@ -1230,32 +1370,22 @@ def run_grading_streaming(exec_id: str, sid: str, aid: str, answers: Dict[str, s
         # Prepare question-specific prompts for each LLM
         prompts = []
         for q_num, q_key, answer in questions_to_grade:
-            # Get the context for this specific question
-            question_context = context_cache.get_question_context(str(q_num))
+            # Get question text
+            question_text = all_questions.get(q_key, f"Question {q_num}")
             
-            # Use the prompt template from the sheet (or default)
-            # Format it with question-specific data
-            try:
-                question_prompt = prompt_template.format(
-                    student_id=sid,
-                    execution_id=exec_id,
-                    question_num=q_num,
-                    answer=answer,
-                    question_context=question_context,
-                    conversation_context=conversation_context
-                )
-            except KeyError as e:
-                # If the template doesn't have the expected placeholders, use it as-is with context appended
-                print(f"[DEBUG] Prompt template missing placeholder {e}, using template with appended context")
-                question_prompt = f"""{prompt_template}
-
-Student ID: {sid}
-Execution ID: {exec_id}
-Question Number: {q_num}
-Student Answer: {answer}
-Question Context: {question_context}
-Conversation Context: {conversation_context}
-"""
+            # Build metadata block for this question
+            metadata = build_grading_metadata(
+                question_num=q_num,
+                question_text=question_text,
+                answer=answer,
+                all_questions=all_questions,
+                all_answers=answers,
+                previous_feedbacks=previous_feedback if previous_feedback else None,
+                previous_scores=previous_feedback if previous_feedback else None
+            )
+            
+            # Wrap metadata in <data> tags and prepend to prompt
+            question_prompt = f"<data>\n{metadata}\n</data>\n\n{prompt_template}"
             
             prompts.append((q_num, question_prompt))
         
@@ -1409,24 +1539,53 @@ def run_grading(exec_id: str, sid: str, aid: str, answers: Dict[str, str]) -> Di
 def run_evaluation_streaming(grade_res: Dict[str, Any]) -> Dict[str, Any]:
     """Optimized evaluation with streaming."""
     try:
-        # Try to get prompt from Google Docs first
-        doc_id = PROMPT_DOC_IDS.get("evaluation")
-        prompt_name = PROMPT_NAMES.get("evaluation")
+        # Get assignment_id from grade_res
+        aid = grade_res.get('assignment_id', '')
         
-        if doc_id and doc_id != "YOUR_EVALUATION_PROMPT_DOC_ID":
-            prompt_template = prompt_manager.get_cached_prompt(doc_id, prompt_name)
-        else:
-            prompt_template = get_default_prompts()["evaluation_prompt"]
+        # Get active questions from session state
+        all_questions = st.session_state.get('active_questions', {})
         
+        # Get current answers from assignment memory
+        all_answers = {}
+        if assignment_memory.current_state:
+            all_answers = assignment_memory.current_state.get('answers', {})
+        
+        # Extract current feedbacks and scores from grade_res
+        current_feedbacks = {}
+        current_scores = {}
+        for i in range(1, 26):
+            feedback_key = f"feedback{i}"
+            score_key = f"score{i}"
+            if feedback_key in grade_res and grade_res[feedback_key]:
+                current_feedbacks[feedback_key] = grade_res[feedback_key]
+            if score_key in grade_res and grade_res[score_key]:
+                current_scores[score_key] = grade_res[score_key]
+        
+        # Try to get prompt from assignments sheet based on assignment_id
+        prompt_template = prompt_manager.get_prompt_cached(aid, "evaluation")
+        
+        # Fall back to default if not found in sheet
         if not prompt_template:
+            print(f"[DEBUG] No prompt found in sheet for assignment {aid}, using default evaluation prompt")
             prompt_template = get_default_prompts()["evaluation_prompt"]
+        else:
+            print(f"[DEBUG] Using custom evaluation prompt from sheet for assignment {aid}")
         
-        # Format the prompt with actual data
-        prompt = prompt_template.format(
-            execution_id=grade_res.get('execution_id', ''),
-            student_id=grade_res.get('student_id', ''),
-            previous_grading=json.dumps(grade_res, indent=2)
+        # Print the actual prompt template being used
+        print(f"[DEBUG] ===== EVALUATION PROMPT TEMPLATE =====")
+        print(f"[DEBUG] {prompt_template[:500]}..." if len(prompt_template) > 500 else f"[DEBUG] {prompt_template}")
+        print(f"[DEBUG] ========================================")
+        
+        # Build metadata block for evaluation
+        metadata = build_evaluation_metadata(
+            all_questions=all_questions,
+            all_answers=all_answers,
+            current_feedbacks=current_feedbacks,
+            current_scores=current_scores
         )
+        
+        # Wrap metadata in <data> tags and prepend to prompt
+        prompt = f"<data>\n{metadata}\n</data>\n\n{prompt_template}"
 
         # Use streaming for faster response
         response_text = ""
@@ -1508,17 +1667,40 @@ def run_evaluation(grade_res: Dict[str, Any]) -> Dict[str, Any]:
 def run_conversation_streaming(exec_id: str, sid: str, user_msg: str) -> Dict[str, Any]:
     """Optimized conversation with streaming and context cache integration."""
     try:
-        # Build context from cache system
-        q1_context = context_cache.get_question_context('1')
-        q2_context = context_cache.get_question_context('2')
-        q3_context = context_cache.get_question_context('3')
-        conversation_context = context_cache.get_conversation_context()
-        
-        # Combine all contexts
-        context_str = f"Question 1 Context:\n{q1_context}\n\nQuestion 2 Context:\n{q2_context}\n\nQuestion 3 Context:\n{q3_context}\n\nConversation History:\n{conversation_context}"
-        
         # Get assignment_id from session state
         aid = st.session_state.get('assignment_id', '')
+        
+        # Get active questions from session state
+        all_questions = st.session_state.get('active_questions', {})
+        
+        # Get current answers from assignment memory
+        all_answers = {}
+        if assignment_memory.current_state:
+            all_answers = assignment_memory.current_state.get('answers', {})
+        
+        # Get current feedbacks and scores from session state
+        current_feedback = st.session_state.get('feedback', {})
+        current_feedbacks = {}
+        current_scores = {}
+        if current_feedback:
+            for i in range(1, 26):
+                feedback_key = f"feedback{i}"
+                score_key = f"score{i}"
+                # Check for both new_ and regular versions
+                if f"new_{feedback_key}" in current_feedback and current_feedback[f"new_{feedback_key}"]:
+                    current_feedbacks[feedback_key] = current_feedback[f"new_{feedback_key}"]
+                elif feedback_key in current_feedback and current_feedback[feedback_key]:
+                    current_feedbacks[feedback_key] = current_feedback[feedback_key]
+                    
+                if f"new_{score_key}" in current_feedback and current_feedback[f"new_{score_key}"]:
+                    current_scores[score_key] = current_feedback[f"new_{score_key}"]
+                elif score_key in current_feedback and current_feedback[score_key]:
+                    current_scores[score_key] = current_feedback[score_key]
+        
+        # Get conversation history from assignment memory
+        conversation_history = []
+        if assignment_memory.current_state:
+            conversation_history = assignment_memory.current_state.get('messages', [])
         
         # Try to get prompt from assignments sheet based on assignment_id
         prompt_template = prompt_manager.get_prompt_cached(aid, "conversation")
@@ -1528,23 +1710,25 @@ def run_conversation_streaming(exec_id: str, sid: str, user_msg: str) -> Dict[st
             print(f"[DEBUG] No prompt found in sheet for assignment {aid}, using default conversation prompt")
             prompt_template = get_default_prompts()["conversation_prompt"]
         else:
-            print(f"[DEBUG] Using conversation prompt from sheet for assignment {aid}")
+            print(f"[DEBUG] Using custom conversation prompt from sheet for assignment {aid}")
         
         # Print the actual prompt template being used
         print(f"[DEBUG] ===== CONVERSATION PROMPT TEMPLATE =====")
         print(f"[DEBUG] {prompt_template[:500]}..." if len(prompt_template) > 500 else f"[DEBUG] {prompt_template}")
         print(f"[DEBUG] ==========================================")
         
-        # Format the prompt with context-aware data
-        prompt = prompt_template.format(
-            context=context_str,
-            user_question=user_msg
+        # Build metadata block for conversation
+        metadata = build_conversation_metadata(
+            all_questions=all_questions,
+            all_answers=all_answers,
+            current_feedbacks=current_feedbacks if current_feedbacks else None,
+            current_scores=current_scores if current_scores else None,
+            conversation_history=conversation_history if conversation_history else None
         )
         
-        # Print the final formatted prompt
-        print(f"[DEBUG] ===== FINAL CONVERSATION PROMPT =====")
-        print(f"[DEBUG] {prompt[:500]}..." if len(prompt) > 500 else f"[DEBUG] {prompt}")
-        print(f"[DEBUG] ========================================")
+        # Wrap metadata in <data> tags and prepend to prompt
+        # Also include the user's current question
+        prompt = f"<data>\n{metadata}\n<current_student_question>{user_msg}</current_student_question>\n</data>\n\n{prompt_template}"
 
         # Use streaming for faster response
         response_text = ""
@@ -1609,6 +1793,9 @@ def main() -> None:
         if not sa:
             return
         aid = str(sa['assignment_id'])
+        
+        # Store assignment_id in session state for use by conversation agent
+        st.session_state['assignment_id'] = aid
 
         qrec = load_questions(aid)
         if not qrec:
@@ -1645,6 +1832,9 @@ def main() -> None:
         # Get active questions from assignment record
         active_questions = qrec.get('active_questions', {})
         num_questions = qrec.get('num_questions', 0)
+        
+        # Store active_questions in session state for use by agents
+        st.session_state['active_questions'] = active_questions
         
         print(f"[DEBUG] Active questions in main loop: {list(active_questions.keys())}")
         print(f"[DEBUG] Number of questions: {num_questions}")
