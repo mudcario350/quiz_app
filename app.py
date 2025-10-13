@@ -1838,12 +1838,41 @@ def main() -> None:
             if previous_answers or previous_feedback or latest_conversation_response:
                 has_previous_data = True
                 print(f"[SESSION RESTORE] Found previous data for student {sid}, assignment {aid}")
+                print(f"[SESSION RESTORE] previous_answers keys: {list(previous_answers.keys())}")
+                print(f"[SESSION RESTORE] previous_feedback keys: {list(previous_feedback.keys())}")
                 
                 # Load all previous session data into memory (only once per session)
                 # This now works because assignment_memory.current_state is initialized above
                 if not st.session_state.get('memory_loaded', False):
                     load_session_data_into_memory(sid, aid)
                     st.session_state['memory_loaded'] = True
+                    
+                # Force populate session state with previous data (only once per student/assignment combo)
+                session_key = f'restored_{sid}_{aid}'
+                if not st.session_state.get(session_key, False):
+                    print(f"[SESSION RESTORE] First time loading for {sid}/{aid} - forcing population of session state")
+                    
+                    # Populate answer values
+                    for q_key, answer_value in previous_answers.items():
+                        val_key = f'{q_key}_val'
+                        st.session_state[val_key] = answer_value
+                        print(f"[SESSION RESTORE] Forced {val_key} = {answer_value[:50]}...")
+                    
+                    # Populate feedback
+                    if previous_feedback:
+                        st.session_state['feedback'] = previous_feedback
+                        st.session_state['submitted'] = True
+                        print(f"[SESSION RESTORE] Forced feedback with keys: {list(previous_feedback.keys())}")
+                    
+                    # Populate conversation
+                    if latest_conversation_response:
+                        st.session_state['last_conversation_response'] = latest_conversation_response
+                        print(f"[SESSION RESTORE] Forced conversation response")
+                    
+                    # Mark this student/assignment as restored
+                    st.session_state[session_key] = True
+                else:
+                    print(f"[SESSION RESTORE] Already restored for {sid}/{aid} in this session")
         else:
             print(f"[SESSION] Assignment not started yet (started={started_status}) - loading fresh form")
         
