@@ -736,7 +736,7 @@ class DataSheets:
         
         self.conversations = Sheet(client, "conversations", [
             "execution_id", "assignment_id", "student_id",
-            "user_msg", "agent_msg", "timestamp"
+            "user_msg", "agent_msg", "timestamp", "winner"
         ])
     
     def validate_record_match(self, record: dict, execution_id: str, student_id: str, assignment_id: str) -> bool:
@@ -2214,7 +2214,8 @@ def run_conversation_streaming(exec_id: str, sid: str, user_msg: str) -> Dict[st
             "student_id": sid,
             "user_msg": user_msg,
             "agent_msg": response_text,
-            "timestamp": datetime.datetime.now().isoformat(sep=' ', timespec='seconds')
+            "timestamp": datetime.datetime.now().isoformat(sep=' ', timespec='seconds'),
+            "winner": None
         }
         
         print("[DEBUG] run_conversation_streaming extracted:", result)
@@ -2230,7 +2231,8 @@ def run_conversation_streaming(exec_id: str, sid: str, user_msg: str) -> Dict[st
             "student_id": sid,
             "user_msg": user_msg,
             "agent_msg": "I'm sorry, I'm having trouble processing your question right now. Please try again.",
-            "timestamp": datetime.datetime.now().isoformat(sep=' ', timespec='seconds')
+            "timestamp": datetime.datetime.now().isoformat(sep=' ', timespec='seconds'),
+            "winner": None
         }
 
 
