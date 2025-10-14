@@ -1429,11 +1429,29 @@ def prompt_student_id() -> Optional[str]:
 
 
 def load_assignment(sid: str) -> Optional[dict[str, Any]]:
-    rec = sheets.student_assignments.fetch_current(sid)
-    if not rec:
-        st.error('Invalid Student ID or no assignment due.')
+    # Allow manual assignment selection with validation
+    aid_input = st.text_input('Assignment ID (manual entry):', key='aid_input').strip()
+    if not aid_input:
+        st.info('Enter an Assignment ID to proceed.')
         return None
-    return rec
+    # Validate the assignment is assigned to this student and not completed (ignore priority/due)
+    sid_key = sid.strip()
+    aid_key = aid_input.strip()
+    candidate = None
+    for rec in sheets.student_assignments.get_all():
+        if str(rec.get('student_id', '')).strip() == sid_key and str(rec.get('assignment_id', '')).strip() == aid_key:
+            candidate = rec
+            break
+    if not candidate:
+        st.error('This assignment is not assigned to your Student ID.')
+        return None
+    # Optional checks: started/completed
+    completed = str(candidate.get('completed', 'FALSE')).strip().upper()
+    if completed == 'TRUE':
+        st.error('This assignment is already completed.')
+        return None
+    # Passed validation
+    return candidate
 
 
 def load_questions(aid: str) -> Optional[dict[str, Any]]:
