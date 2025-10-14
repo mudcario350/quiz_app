@@ -378,16 +378,22 @@ st.set_page_config(page_title='Dynamic AI Assignment', layout='centered')
 # --- Custom CSS for Modern Look ---
 st.markdown('''
     <style>
-    body {
-        background-color: #f7f9fa;
+    @media (prefers-color-scheme: dark) {
+      body { background-color: #0e1117; color: #ffffff; }
+      .main { background-color: #111827; color: #ffffff; }
+      .stButton>button { color: #ffffff !important; }
+      .stTextInput>div>input, .stTextArea>div>textarea { color: #ffffff; background: #111827; border-color: #374151; }
     }
-    .main {
+    @media (prefers-color-scheme: light) {
+      body { background-color: #f7f9fa; color: #000000; }
+      .main {
         background-color: #fff;
         border-radius: 12px;
         box-shadow: 0 2px 8px rgba(0,0,0,0.07);
         padding: 2rem 2rem 1rem 2rem;
         margin-top: 1.5rem;
-        color: #222;
+        color: #000000;
+      }
     }
     .block-container {
         padding-top: 1.5rem;
@@ -399,15 +405,15 @@ st.markdown('''
         padding: 0.7rem 1rem 0.7rem 1rem;
         margin-bottom: 0.7rem;
         box-shadow: 0 1px 4px rgba(0,0,0,0.04);
-        color: #fff !important;
+        color: inherit !important;
         font-size: 1.08rem;
         font-weight: 400;
     }
     .question-card, .question-card * {
-        color: #fff !important;
+        color: inherit !important;
     }
     .question-card h3, .feedback-card h3, .main h1, .main h2, .main h3 {
-        color: #fff !important;
+        color: inherit !important;
         font-size: 1.25rem !important;
         margin-bottom: 0.3rem !important;
         margin-top: 0.3rem !important;
@@ -430,7 +436,6 @@ st.markdown('''
         padding: 0.5rem 1.2rem;
         font-size: 1.1rem;
         background: linear-gradient(90deg, #425066 0%, #7a8ca3 100%) !important;
-        color: #fff !important;
         border: none;
         margin-top: 0.5rem;
     }
@@ -456,7 +461,7 @@ st.markdown('''
     /* --- FORCE FEEDBACK CARD COLOR OVERRIDE --- */
     .feedback-card, .feedback-card * {
         background: rgba(60, 180, 90, 0.10) !important;
-        color: #fff !important;
+        color: inherit !important;
     }
     </style>
 ''', unsafe_allow_html=True)
@@ -734,6 +739,12 @@ class DataSheets:
             "user_msg", "agent_msg", "timestamp"
         ])
     
+    def validate_record_match(self, record: dict, execution_id: str, student_id: str, assignment_id: str) -> bool:
+        """Validate that a record matches the expected execution_id, student_id, and assignment_id."""
+        return (str(record.get("execution_id", "")).strip() == execution_id.strip() and
+                str(record.get("student_id", "")).strip() == student_id.strip() and
+                str(record.get("assignment_id", "")).strip() == assignment_id.strip())
+    
     def get_latest_answers(self, student_id: str, assignment_id: str) -> dict[str, Any]:
         """Get the most recent answers for a student and assignment."""
         sid = student_id.strip()
@@ -828,6 +839,89 @@ class DataSheets:
         
         # Sort by timestamp to maintain chronological order
         all_conversations.sort(key=lambda x: x.get("timestamp", ""))
+        return all_conversations
+    
+    # --- EXECUTION_ID-AWARE METHODS FOR CURRENT SESSION ---
+    # These methods enforce execution_id matching to prevent cross-contamination between concurrent sessions
+    
+    def get_current_session_answers(self, execution_id: str, student_id: str, assignment_id: str, max_retries: int = 3) -> dict[str, Any]:
+        """Get answers for current execution session with retry logic."""
+        eid = execution_id.strip()
+        sid = student_id.strip()
+        aid = assignment_id.strip()
+        
+        for attempt in range(max_retries):
+            latest_record = {}
+            latest_timestamp = None
+            
+            for rec in self.answers.get_all():
+                if self.validate_record_match(rec, eid, sid, aid):
+                    timestamp_str = rec.get("timestamp", "")
+                    if timestamp_str and (latest_timestamp is None or timestamp_str > latest_timestamp):
+                        latest_timestamp = timestamp_str
+                        latest_record = rec
+            
+            if latest_record:
+                print(f"[EXEC_ID] Found matching answer record for exec_id={eid}")
+                return latest_record
+            
+            # No matching record found - repoll
+            if attempt < max_retries - 1:
+                print(f"[EXEC_ID] No matching answers for exec_id={eid}, repolling... (attempt {attempt + 1}/{max_retries})")
+                time.sleep(0.5)  # Brief delay before repoll
+                # Force cache refresh
+                self.answers._cache = {}
+                self.answers._cache_timestamp = 0
+        
+        print(f"[EXEC_ID] No matching answers found after {max_retries} attempts for exec_id={eid}")
+        return {}
+    
+    def get_current_session_grading(self, execution_id: str, student_id: str, assignment_id: str, max_retries: int = 3) -> dict[str, Any]:
+        """Get grading for current execution session with retry logic."""
+        eid = execution_id.strip()
+        sid = student_id.strip()
+        aid = assignment_id.strip()
+        
+        for attempt in range(max_retries):
+            latest_record = {}
+            latest_timestamp = None
+            
+            for rec in self.grading.get_all():
+                if self.validate_record_match(rec, eid, sid, aid):
+                    timestamp_str = rec.get("timestamp", "")
+                    if timestamp_str and (latest_timestamp is None or timestamp_str > latest_timestamp):
+                        latest_timestamp = timestamp_str
+                        latest_record = rec
+            
+            if latest_record:
+                print(f"[EXEC_ID] Found matching grading record for exec_id={eid}")
+                return latest_record
+            
+            # No matching record found - repoll
+            if attempt < max_retries - 1:
+                print(f"[EXEC_ID] No matching grading for exec_id={eid}, repolling... (attempt {attempt + 1}/{max_retries})")
+                time.sleep(0.5)
+                # Force cache refresh
+                self.grading._cache = {}
+                self.grading._cache_timestamp = 0
+        
+        print(f"[EXEC_ID] No matching grading found after {max_retries} attempts for exec_id={eid}")
+        return {}
+    
+    def get_current_session_conversations(self, execution_id: str, student_id: str, assignment_id: str) -> List[dict[str, Any]]:
+        """Get all conversations for current execution session."""
+        eid = execution_id.strip()
+        sid = student_id.strip()
+        aid = assignment_id.strip()
+        all_conversations = []
+        
+        for rec in self.conversations.get_all():
+            if self.validate_record_match(rec, eid, sid, aid):
+                all_conversations.append(rec)
+        
+        # Sort by timestamp to maintain chronological order
+        all_conversations.sort(key=lambda x: x.get("timestamp", ""))
+        print(f"[EXEC_ID] Found {len(all_conversations)} conversation(s) for exec_id={eid}")
         return all_conversations
     
     def update_started_status(self, student_id: str, assignment_id: str, started: str):
@@ -1525,6 +1619,34 @@ def build_conversation_metadata(all_questions: Dict[str, str], all_answers: Dict
 
 # Orchestration text is now imported from prompt_manager
 
+def is_valid_grading_response(response_data: dict, question_num: int) -> bool:
+    """Validate that a grading response has the required fields and valid data."""
+    score_key = f"score{question_num}"
+    feedback_key = f"feedback{question_num}"
+    
+    # Check if required keys exist
+    if score_key not in response_data or feedback_key not in response_data:
+        return False
+    
+    # Check if score is valid (0-10)
+    try:
+        score = int(response_data[score_key])
+        if not (0 <= score <= 10):
+            return False
+    except (ValueError, TypeError):
+        return False
+    
+    # Check if feedback is non-empty string
+    feedback = response_data[feedback_key]
+    if not isinstance(feedback, str) or not feedback.strip():
+        return False
+    
+    # Check if feedback is not just error text or placeholder
+    if len(feedback.strip()) < 10:  # Too short to be real feedback
+        return False
+    
+    return True
+
 
 def run_grading_streaming(exec_id: str, sid: str, aid: str, answers: Dict[str, str]) -> Dict[str, Any]:
     """True parallel grading - all API calls made simultaneously. Supports variable number of questions (1-25)."""
@@ -1679,70 +1801,101 @@ def run_grading_streaming(exec_id: str, sid: str, aid: str, answers: Dict[str, s
         return error_result
 
 
-def _make_single_api_call(question_num: int, prompt: str) -> Dict[str, Any]:
-    """Make a single API call to the configured LLM for grading with dedicated agent instance."""
-    try:
-        # Create a dedicated agent instance for this thread to avoid conflicts
-        if LLM_PROVIDER == "gemini" and GEMINI_API_KEY:
-            thread_agent = ChatGoogleGenerativeAI(
-                model=DEFAULT_MODEL["gemini"],
-                temperature=1,
-                google_api_key=GEMINI_API_KEY,
-                streaming=True,
-                max_output_tokens=4000,
-                request_timeout=60
-            )
-        else:
-            thread_agent = ChatOpenAI(
-                model_name=DEFAULT_MODEL["openai"], 
-                temperature=1,
-                openai_api_key=OPENAI_API_KEY,
-                streaming=True,
-                max_tokens=4000,
-                request_timeout=60
-            )
-        
-        # Use streaming for faster response
-        response_text = ""
-        for chunk in thread_agent.stream(prompt):
-            if hasattr(chunk, 'content'):
-                response_text += chunk.content
-        
-        response_preview = response_text[:50] + "..." if len(response_text) > 50 else response_text
-        print(f"[DEBUG] Q{question_num} API response received: {response_preview}")
-        
-        # Parse JSON response
-        result = {}
+def _make_single_api_call(question_num: int, prompt: str, max_retries: int = 3) -> Dict[str, Any]:
+    """Make a single API call to the configured LLM for grading with dedicated agent instance and retry logic."""
+    
+    # Create a dedicated agent instance for this thread to avoid conflicts
+    if LLM_PROVIDER == "gemini" and GEMINI_API_KEY:
+        thread_agent = ChatGoogleGenerativeAI(
+            model=DEFAULT_MODEL["gemini"],
+            temperature=1,
+            google_api_key=GEMINI_API_KEY,
+            streaming=True,
+            max_output_tokens=4000,
+            request_timeout=60
+        )
+    else:
+        thread_agent = ChatOpenAI(
+            model_name=DEFAULT_MODEL["openai"], 
+            temperature=1,
+            openai_api_key=OPENAI_API_KEY,
+            streaming=True,
+            max_tokens=4000,
+            request_timeout=60
+        )
+    
+    # Retry loop for malformed responses
+    for attempt in range(max_retries):
         try:
-            import re
-            json_match = re.search(r'\{.*?\}', response_text, re.DOTALL)
-            if json_match:
-                result = json.loads(json_match.group())
-            else:
-                result = json.loads(response_text.strip())
-        except json.JSONDecodeError:
-            # Fallback response - clean up any JSON artifacts
-            clean_feedback = response_text
-            # Remove common JSON artifacts
-            clean_feedback = re.sub(r'```json\s*', '', clean_feedback)
-            clean_feedback = re.sub(r'```\s*', '', clean_feedback)
-            clean_feedback = re.sub(r'\{[^}]*\}', '', clean_feedback)  # Remove JSON objects
-            clean_feedback = re.sub(r'"[^"]*":\s*"[^"]*"', '', clean_feedback)  # Remove key-value pairs
-            clean_feedback = clean_feedback.strip()
+            # Use streaming for faster response
+            response_text = ""
+            for chunk in thread_agent.stream(prompt):
+                if hasattr(chunk, 'content'):
+                    response_text += chunk.content
             
-            result = {
-                f"score{question_num}": 5,
-                f"feedback{question_num}": clean_feedback[:300] + "..." if len(clean_feedback) > 300 else clean_feedback if clean_feedback else "No feedback available"
-            }
-        
-        return result
-        
-    except Exception as e:
-        print(f"[ERROR] Q{question_num} API call failed: {e}")
-        return {
-            f"score{question_num}": 5,
-            f"feedback{question_num}": f"Error grading question {question_num}: {str(e)}"
-        }
+            response_preview = response_text[:50] + "..." if len(response_text) > 50 else response_text
+            print(f"[DEBUG] Q{question_num} API response received (attempt {attempt + 1}): {response_preview}")
+            
+            # Parse JSON response
+            result = {}
+            try:
+                import re
+                json_match = re.search(r'\{.*?\}', response_text, re.DOTALL)
+                if json_match:
+                    result = json.loads(json_match.group())
+                else:
+                    result = json.loads(response_text.strip())
+            except json.JSONDecodeError:
+                print(f"[WARNING] Q{question_num} JSON parse failed on attempt {attempt + 1}")
+                # Create fallback result
+                clean_feedback = response_text
+                # Remove common JSON artifacts
+                clean_feedback = re.sub(r'```json\s*', '', clean_feedback)
+                clean_feedback = re.sub(r'```\s*', '', clean_feedback)
+                clean_feedback = re.sub(r'\{[^}]*\}', '', clean_feedback)
+                clean_feedback = re.sub(r'"[^"]*":\s*"[^"]*"', '', clean_feedback)
+                clean_feedback = clean_feedback.strip()
+                
+                result = {
+                    f"score{question_num}": 5,
+                    f"feedback{question_num}": clean_feedback if clean_feedback else "Malformed response"
+                }
+            
+            # Validate the response
+            if is_valid_grading_response(result, question_num):
+                print(f"[SUCCESS] Q{question_num} received valid response on attempt {attempt + 1}")
+                return result
+            else:
+                print(f"[WARNING] Q{question_num} response validation failed on attempt {attempt + 1}")
+                if attempt < max_retries - 1:
+                    print(f"[RETRY] Q{question_num} retrying LLM call...")
+                    time.sleep(0.5)  # Brief delay before retry
+                    continue
+                else:
+                    # Final attempt failed
+                    print(f"[ERROR] Q{question_num} failed validation after {max_retries} attempts")
+                    return {
+                        f"score{question_num}": 5,
+                        f"feedback{question_num}": "Grading failed: Unable to generate valid feedback after multiple attempts"
+                    }
+            
+        except Exception as e:
+            print(f"[ERROR] Q{question_num} API call failed on attempt {attempt + 1}: {e}")
+            if attempt < max_retries - 1:
+                print(f"[RETRY] Q{question_num} retrying after error...")
+                time.sleep(0.5)
+                continue
+            else:
+                return {
+                    f"score{question_num}": 5,
+                    f"feedback{question_num}": f"Error grading question {question_num}: {str(e)}"
+                }
+    
+    # Should never reach here, but just in case
+    return {
+        f"score{question_num}": 5,
+        f"feedback{question_num}": "Grading failed: Maximum retries exceeded"
+    }
 
 
 def run_grading(exec_id: str, sid: str, aid: str, answers: Dict[str, str]) -> Dict[str, Any]:
@@ -2039,6 +2192,7 @@ def run_conversation_streaming(exec_id: str, sid: str, user_msg: str) -> Dict[st
         
         result = {
             "execution_id": exec_id,
+            "assignment_id": aid,
             "student_id": sid,
             "user_msg": user_msg,
             "agent_msg": response_text,
@@ -2051,8 +2205,10 @@ def run_conversation_streaming(exec_id: str, sid: str, user_msg: str) -> Dict[st
     except Exception as e:
         print(f"[ERROR] run_conversation_streaming failed: {e}")
         st.error(f"Conversation failed: {e}")
+        aid = st.session_state.get('assignment_id', '')
         return {
             "execution_id": exec_id,
+            "assignment_id": aid,
             "student_id": sid,
             "user_msg": user_msg,
             "agent_msg": "I'm sorry, I'm having trouble processing your question right now. Please try again.",
@@ -2252,14 +2408,14 @@ def main() -> None:
                     score_class = 'score-low'
                     emoji = '❌'
                 st.markdown(f"""
-                    <div class='feedback-score-card' style='background:rgba(180,255,80,0.18); color:#fff; border-radius:8px 8px 0 0; padding:1rem; margin-bottom:0; font-size:1.08rem;'>
+                    <div class='feedback-score-card' style='background:rgba(180,255,80,0.18); color:inherit; border-radius:8px 8px 0 0; padding:1rem; margin-bottom:0; font-size:1.08rem;'>
                         <span class='{score_class}'>{emoji} Score: {score}/10</span>
                     </div>
                 """, unsafe_allow_html=True)
                 if text:
                     st.markdown(
                         f"""
-                        <div style='background:rgba(180,255,80,0.18); color:#fff; border-radius:0 0 8px 8px; padding:1rem; margin-bottom:0.7rem; font-size:1.08rem; margin-top:0;'>
+                        <div style='background:rgba(180,255,80,0.18); color:inherit; border-radius:0 0 8px 8px; padding:1rem; margin-bottom:0.7rem; font-size:1.08rem; margin-top:0;'>
                             <b>Feedback:</b><br>{text}
                         </div>
                         """, unsafe_allow_html=True
@@ -2375,26 +2531,26 @@ def main() -> None:
                                 else:
                                     st.error("Failed to grade your answers. Please try again.")
                             rerun()
-                # Add enhanced feedback button
-                col1, col2 = st.columns(2)
-                with col1:
-                    enhanced_feedback = st.button('Get Enhanced Feedback', key='enhanced_feedback_btn')
-                    if enhanced_feedback:
-                        with st.spinner('Getting enhanced feedback...'):
-                            eval_res = run_evaluation(fb)
-                            if eval_res:
-                                # Queue evaluation data for background writing
-                                background_writer.write_async('evaluation', eval_res)
-                                st.session_state['feedback'] = eval_res
-                                st.success('Enhanced feedback generated!')
-                                rerun()
-                            else:
-                                st.error("Failed to get enhanced feedback.")
+                # Enhanced feedback button is disabled for now
+                # col1, col2 = st.columns(2)
+                # with col1:
+                #     enhanced_feedback = st.button('Get Enhanced Feedback', key='enhanced_feedback_btn')
+                #     if enhanced_feedback:
+                #         with st.spinner('Getting enhanced feedback...'):
+                #             eval_res = run_evaluation(fb)
+                #             if eval_res:
+                #                 # Queue evaluation data for background writing
+                #                 background_writer.write_async('evaluation', eval_res)
+                #                 st.session_state['feedback'] = eval_res
+                #                 st.success('Enhanced feedback generated!')
+                #                 rerun()
+                #             else:
+                #                 st.error("Failed to get enhanced feedback.")
                 
-                with col2:
-                    # Use a counter-based key to force clearing
-                    conv_counter = st.session_state.get('conv_counter', 0)
-                    user_q = st.text_input('Ask a follow-up question:', key=f'conv_{conv_counter}')
+                # Follow-up question (full width now that enhanced feedback is hidden)
+                # Use a counter-based key to force clearing
+                conv_counter = st.session_state.get('conv_counter', 0)
+                user_q = st.text_input('Ask a follow-up question:', key=f'conv_{conv_counter}')
                 
                 # Only process if there's a new question and it hasn't been processed yet
                 if user_q and user_q != st.session_state.get('last_processed_question', ''):
@@ -2558,15 +2714,16 @@ def run_app():
         main()
     except KeyboardInterrupt:
         print("\n🛑 App interrupted by user")
+        st.warning("App interrupted by user")
     except Exception as e:
         print(f"❌ App error: {e}")
+        st.error(f"App error: {e}")
+        import traceback
+        st.code(traceback.format_exc())
     finally:
         print("🔄 Ensuring all writes complete before shutdown...")
-        try:
-            background_writer.shutdown()
-            print("✅ All writes completed successfully")
-        except Exception as e:
-            print(f"⚠️ Error during shutdown: {e}")
+        # Note: background_writer.shutdown() is only called on actual app shutdown, not on reruns
+        # Streamlit reruns don't trigger the finally block in the way we expect
 
 # Run the app
 run_app()
