@@ -623,14 +623,41 @@ class StudentAssignmentsSheet(Sheet):
     def __init__(self, client):
         super().__init__(client, "student_assignments", [
             "student_id", "student_first_name", "student_last_name",
-            "assignment_id", "assignment_due", "started"
+            "assignment_id", "assignment_due", "started", "completed", "priority"
         ])
 
     def fetch_current(self, student_id: str) -> dict[str, Any]:
+        """
+        Fetch the current assignment for a student based on new priority system.
+        
+        Selection criteria:
+        1. Filter by student_id
+        2. Exclude assignments ending with "_da" (debate assignments)
+        3. Only include assignments where completed == "FALSE"
+        4. Sort by priority (highest first), then by due date (soonest first)
+        5. Return the top assignment
+        """
         sid = student_id.strip()
         today = datetime.date.today()
+        
+        # Get all assignments for this student
+        student_assignments = []
         for rec in self.get_all():
             if str(rec.get("student_id", "")).strip() == sid:
+                aid = str(rec.get("assignment_id", "")).strip()
+                
+                # Exclude debate assignments (ending with _da)
+                if aid.endswith("_da"):
+                    print(f"[DEBUG] Skipping debate assignment: {aid}")
+                    continue
+                
+                # Only include incomplete assignments
+                completed_status = str(rec.get("completed", "FALSE")).strip().upper()
+                if completed_status == "TRUE":
+                    print(f"[DEBUG] Skipping completed assignment: {aid}")
+                    continue
+                
+                # Parse due date
                 due_str = str(rec.get("assignment_due", "")).strip()
                 due = None
                 for fmt in ("%Y-%m-%d", "%m/%d/%Y"):  # ISO or US
@@ -639,9 +666,31 @@ class StudentAssignmentsSheet(Sheet):
                         break
                     except ValueError:
                         due = None
-                if due and due >= today:
-                    return rec
-        return {}
+                
+                # Parse priority (default to 0 if not set)
+                try:
+                    priority = int(rec.get("priority", 0)) if rec.get("priority") else 0
+                except (ValueError, TypeError):
+                    priority = 0
+                
+                student_assignments.append({
+                    "record": rec,
+                    "assignment_id": aid,
+                    "due_date": due,
+                    "priority": priority
+                })
+        
+        if not student_assignments:
+            print(f"[DEBUG] No eligible assignments found for student {sid}")
+            return {}
+        
+        # Sort by priority (descending), then by due date (ascending)
+        student_assignments.sort(key=lambda x: (-x["priority"], x["due_date"] if x["due_date"] else datetime.date.max))
+        
+        selected = student_assignments[0]
+        print(f"[DEBUG] Selected assignment: {selected['assignment_id']} (priority={selected['priority']}, due={selected['due_date']})")
+        
+        return selected["record"]
 
 class DataSheets:
     def __init__(self, creds: dict):
@@ -793,6 +842,25 @@ class DataSheets:
                 # Update the started field
                 row_num = i + 2  # +2 because sheets are 1-indexed and we have a header row
                 self.student_assignments.ws.update_cell(row_num, 6, started)  # Column 6 is "started"
+                print(f"[DEBUG] Updated started status to {started} for student {sid}, assignment {aid}")
+                break
+    
+    def update_completed_status(self, student_id: str, assignment_id: str, completed: str):
+        """Update the completed status for a student assignment."""
+        sid = student_id.strip()
+        aid = assignment_id.strip()
+        
+        # Find the row to update
+        for i, rec in enumerate(self.student_assignments.get_all()):
+            if (str(rec.get("student_id", "")).strip() == sid and 
+                str(rec.get("assignment_id", "")).strip() == aid):
+                # Update the completed field
+                row_num = i + 2  # +2 because sheets are 1-indexed and we have a header row
+                self.student_assignments.ws.update_cell(row_num, 7, completed)  # Column 7 is "completed"
+                print(f"[DEBUG] Updated completed status to {completed} for student {sid}, assignment {aid}")
+                # Invalidate cache
+                self.student_assignments._cache = {}
+                self.student_assignments._cache_timestamp = 0
                 break
 
 # Initialize sheets
@@ -2273,6 +2341,16 @@ def main() -> None:
             
             if all(score >= THRESHOLD_SCORE for score in scores):
                 st.success(f'🎉 You have successfully completed this assignment! All {num_questions} questions passed!')
+                
+                # Update completed status to TRUE if not already set
+                # Check current completed status
+                current_completed = sa.get('completed', 'FALSE').upper()
+                if current_completed != 'TRUE':
+                    try:
+                        sheets.update_completed_status(sid, aid, 'TRUE')
+                        print(f"[COMPLETION] Marked assignment {aid} as completed for student {sid}")
+                    except Exception as e:
+                        print(f"[ERROR] Failed to update completed status: {e}")
             else:
                 passed = sum(1 for score in scores if score >= THRESHOLD_SCORE)
                 st.warning(f'You need scores of {THRESHOLD_SCORE} or higher on all questions to complete this assignment. ({passed}/{num_questions} passed)')
