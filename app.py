@@ -371,9 +371,6 @@ def get_evaluation_output_format(num_questions: int) -> str:
 # Main Application (from source_app.py)
 # ===========================
 
-    PromptManager, get_default_prompts, get_orchestration_text,
-    get_grading_output_format, get_evaluation_output_format
-)
 
 # Page config must be first
 st.set_page_config(page_title='Dynamic AI Assignment', layout='centered')
@@ -503,7 +500,7 @@ class Sheet:
         self.headers = headers
         self._cache = {}
         self._cache_timestamp = 0
-        self._cache_ttl = 30  # Cache for 30 seconds
+        self._cache_ttl = 10  # Cache for only 10 seconds to ensure fresher data
         ss = client.open(SPREADSHEET_NAME)
         try:
             self.ws = ss.worksheet(title)
@@ -518,8 +515,47 @@ class Sheet:
             return self._cache
         
         # Fetch fresh data
-        self._cache = self.ws.get_all_records()
-        self._cache_timestamp = current_time
+        try:
+            # First, check if there are empty headers in the sheet
+            actual_headers = self.ws.row_values(1)
+            # Filter out empty headers and only keep the ones we expect
+            filtered_headers = [h for h in actual_headers if h.strip()]
+            
+            # If there are empty headers, use expected_headers parameter
+            if len(filtered_headers) < len(actual_headers):
+                empty_count = len(actual_headers) - len(filtered_headers)
+                print(f"[DEBUG] Found {empty_count} empty header(s) in sheet, using expected_headers parameter")
+                self._cache = self.ws.get_all_records(expected_headers=self.headers)
+            else:
+                self._cache = self.ws.get_all_records()
+            self._cache_timestamp = current_time
+        except Exception as e:
+            print(f"[ERROR] get_all_records() failed: {e}")
+            # If there's a header uniqueness issue, try with expected_headers parameter
+            try:
+                print(f"[DEBUG] Attempting get_all_records() with expected_headers")
+                self._cache = self.ws.get_all_records(expected_headers=self.headers)
+                self._cache_timestamp = current_time
+                print(f"[DEBUG] Successfully fetched records with expected_headers parameter")
+            except Exception as e2:
+                print(f"[ERROR] get_all_records() with expected_headers also failed: {e2}")
+                # Last resort: check actual headers
+                try:
+                    actual_headers = self.ws.row_values(1)
+                    print(f"[ERROR] Actual headers from sheet: {actual_headers}")
+                    from collections import Counter
+                    header_counts = Counter(actual_headers)
+                    duplicates = [h for h, c in header_counts.items() if c > 1 and h != '']
+                    empty_count = actual_headers.count('')
+                    if duplicates:
+                        print(f"[ERROR] ❌ DUPLICATE HEADERS IN GOOGLE SHEET: {duplicates}")
+                    if empty_count > 0:
+                        print(f"[ERROR] ❌ EMPTY COLUMN HEADERS IN GOOGLE SHEET: {empty_count} empty headers")
+                except Exception as e3:
+                    print(f"[ERROR] Could not diagnose header issue: {e3}")
+                self._cache = []
+                self._cache_timestamp = current_time
+        
         return self._cache
 
     def is_duplicate(self, data: dict[str, any]) -> bool:
@@ -531,12 +567,27 @@ class Sheet:
         return False
 
     def append_row(self, data: dict[str, Any]) -> None:
-        if not self.is_duplicate(data):
-            row = [data.get(h, "") for h in self.headers]
-            self.ws.append_row(row)
-            # Invalidate cache after write
-            self._cache = {}
-            self._cache_timestamp = 0
+        try:
+            if not self.is_duplicate(data):
+                row = [data.get(h, "") for h in self.headers]
+                # Debug: Show first 10 values being written in order
+                print(f"[DEBUG] Writing row with {len(row)} values in order: {row[:10]}...")
+                self.ws.append_row(row)
+                # Invalidate cache after successful write
+                self._cache = {}
+                self._cache_timestamp = 0
+                print(f"[DEBUG] Cache invalidated after successful write")
+        except Exception as e:
+            print(f"[ERROR] Failed to append row: {e}")
+            # Try to diagnose the issue
+            try:
+                actual_headers = self.ws.row_values(1)
+                print(f"[DEBUG] Expected {len(self.headers)} columns, sheet has {len(actual_headers)} columns")
+                print(f"[DEBUG] Expected headers: {self.headers}")
+                print(f"[DEBUG] Actual headers: {actual_headers}")
+            except:
+                pass
+            raise  # Re-raise the exception after logging
 
 # Specific sheet classes
 class AssignmentsSheet(Sheet):
@@ -612,23 +663,22 @@ class DataSheets:
         # Build feedback and score columns for up to 25 questions
         feedback_columns = [f"feedback{i}" for i in range(1, 26)]
         score_columns = [f"score{i}" for i in range(1, 26)]
-        # Interleave feedback and score columns
-        grading_columns = []
-        for i in range(1, 26):
-            grading_columns.extend([f"feedback{i}", f"score{i}"])
+        # Group feedback columns first, then score columns (to match Google Sheet format)
+        grading_columns = feedback_columns + score_columns
+        grading_headers = ["execution_id", "assignment_id", "student_id"] + grading_columns + ["timestamp"]
+        print(f"[INIT] Grading sheet headers (GROUPED format): {grading_headers[:10]}...{grading_headers[-5:]}")
         
-        self.grading = Sheet(client, "feedback+grading",
-            ["execution_id", "assignment_id", "student_id"] + grading_columns + ["timestamp"]
-        )
+        self.grading = Sheet(client, "feedback+grading", grading_headers)
         
         # Build evaluation columns for up to 25 questions
-        eval_columns = []
-        for i in range(1, 26):
-            eval_columns.extend([f"new_feedback{i}", f"new_score{i}"])
+        new_feedback_columns = [f"new_feedback{i}" for i in range(1, 26)]
+        new_score_columns = [f"new_score{i}" for i in range(1, 26)]
+        # Group new_feedback columns first, then new_score columns (to match Google Sheet format)
+        eval_columns = new_feedback_columns + new_score_columns
+        eval_headers = ["execution_id", "assignment_id", "student_id"] + eval_columns + ["timestamp"]
+        print(f"[INIT] Evaluation sheet headers (GROUPED format): {eval_headers[:10]}...{eval_headers[-5:]}")
         
-        self.evaluation = Sheet(client, "feedback_evaluation",
-            ["execution_id", "assignment_id", "student_id"] + eval_columns + ["timestamp"]
-        )
+        self.evaluation = Sheet(client, "feedback_evaluation", eval_headers)
         
         self.conversations = Sheet(client, "conversations", [
             "execution_id", "assignment_id", "student_id",
@@ -961,14 +1011,15 @@ def get_assignment_memory_manager():
 
 assignment_memory = get_assignment_memory_manager()
 
-@st.cache_data(ttl=300)  # Cache for 5 minutes
 def load_previous_session_data(student_id: str, assignment_id: str) -> tuple[Dict[str, str], Dict[str, Any], str]:
     """
     Load previous session data for a student and assignment.
     Returns: (previous_answers, previous_feedback, latest_conversation_response)
+    
+    Note: No caching to ensure fresh data on every page load/refresh
     """
     try:
-        print(f"[SESSION RESTORE] Loading data for student {student_id}, assignment {assignment_id}")
+        print(f"[SESSION RESTORE] Loading FRESH data for student {student_id}, assignment {assignment_id}")
         
         # Get all data in one go to minimize API calls
         all_answers = sheets.get_all_answers_for_memory(student_id, assignment_id)
@@ -1117,18 +1168,46 @@ class SimpleBackgroundWriter:
     def write_async(self, operation_type: str, data: dict):
         """Start a background thread to write data to sheets."""
         def write_worker():
+            sheet_obj = None
             try:
+                print(f"[WRITE] Starting write for {operation_type} with {len(data)} fields")
+                print(f"[WRITE] Data keys: {list(data.keys())[:15]}...")
+                
                 if operation_type == 'answers':
-                    self.sheets.answers.append_row(data)
+                    sheet_obj = self.sheets.answers
+                    print(f"[WRITE] Answers sheet expects {len(sheet_obj.headers)} columns")
+                    sheet_obj.append_row(data)
                 elif operation_type == 'grading':
-                    self.sheets.grading.append_row(data)
+                    sheet_obj = self.sheets.grading
+                    print(f"[WRITE] Grading sheet expects {len(sheet_obj.headers)} columns")
+                    print(f"[WRITE] Grading sheet header order: {sheet_obj.headers[:10]}...{sheet_obj.headers[-5:]}")
+                    sheet_obj.append_row(data)
                 elif operation_type == 'evaluation':
-                    self.sheets.evaluation.append_row(data)
+                    sheet_obj = self.sheets.evaluation
+                    print(f"[WRITE] Evaluation sheet expects {len(sheet_obj.headers)} columns")
+                    sheet_obj.append_row(data)
                 elif operation_type == 'conversations':
-                    self.sheets.conversations.append_row(data)
+                    sheet_obj = self.sheets.conversations
+                    sheet_obj.append_row(data)
                 print(f"[DEBUG] Successfully wrote {operation_type} data to sheets")
+                # Note: Cache is already invalidated in append_row() method
             except Exception as e:
                 print(f"[ERROR] Failed to write {operation_type} data: {e}")
+                # Try to get the actual headers from the sheet for debugging
+                if sheet_obj:
+                    try:
+                        actual_headers = sheet_obj.ws.row_values(1)
+                        expected_headers = sheet_obj.headers
+                        print(f"[ERROR] Expected headers ({len(expected_headers)}): {expected_headers}")
+                        print(f"[ERROR] Actual headers ({len(actual_headers)}): {actual_headers}")
+                        # Find duplicates
+                        from collections import Counter
+                        header_counts = Counter(actual_headers)
+                        duplicates = [header for header, count in header_counts.items() if count > 1]
+                        if duplicates:
+                            print(f"[ERROR] Duplicate headers found: {duplicates}")
+                    except Exception as debug_error:
+                        print(f"[ERROR] Could not retrieve headers for debugging: {debug_error}")
         
         # Start background thread
         thread = threading.Thread(target=write_worker, daemon=True)
@@ -1625,8 +1704,16 @@ def run_evaluation_streaming(grade_res: Dict[str, Any]) -> Dict[str, Any]:
             score_key = f"score{i}"
             if feedback_key in grade_res and grade_res[feedback_key]:
                 current_feedbacks[feedback_key] = grade_res[feedback_key]
-            if score_key in grade_res and grade_res[score_key]:
-                current_scores[score_key] = grade_res[score_key]
+            if score_key in grade_res:
+                score_val = grade_res[score_key]
+                # Ensure score is numeric, handle empty strings from sheets
+                try:
+                    if score_val and str(score_val).strip():
+                        current_scores[score_key] = int(float(score_val))
+                    else:
+                        current_scores[score_key] = 0
+                except (ValueError, TypeError):
+                    current_scores[score_key] = 0
         
         # Try to get prompt from assignments sheet based on assignment_id
         prompt_template = prompt_manager.get_prompt_cached(aid, "evaluation")
@@ -1807,10 +1894,21 @@ def run_conversation_streaming(exec_id: str, sid: str, user_msg: str) -> Dict[st
                 elif feedback_key in current_feedback and current_feedback[feedback_key]:
                     current_feedbacks[feedback_key] = current_feedback[feedback_key]
                     
+                # Extract and convert scores safely
+                score_val = None
                 if f"new_{score_key}" in current_feedback and current_feedback[f"new_{score_key}"]:
-                    current_scores[score_key] = current_feedback[f"new_{score_key}"]
+                    score_val = current_feedback[f"new_{score_key}"]
                 elif score_key in current_feedback and current_feedback[score_key]:
-                    current_scores[score_key] = current_feedback[score_key]
+                    score_val = current_feedback[score_key]
+                
+                if score_val is not None:
+                    try:
+                        if str(score_val).strip():
+                            current_scores[score_key] = int(float(score_val))
+                        else:
+                            current_scores[score_key] = 0
+                    except (ValueError, TypeError):
+                        current_scores[score_key] = 0
         
         # Get conversation history from assignment memory
         conversation_history = []
@@ -1974,33 +2072,27 @@ def main() -> None:
                 if not st.session_state.get('memory_loaded', False):
                     load_session_data_into_memory(sid, aid)
                     st.session_state['memory_loaded'] = True
-                    
-                # Force populate session state with previous data (only once per student/assignment combo)
-                session_key = f'restored_{sid}_{aid}'
-                if not st.session_state.get(session_key, False):
-                    print(f"[SESSION RESTORE] First time loading for {sid}/{aid} - forcing population of session state")
-                    
-                    # Populate answer values
-                    for q_key, answer_value in previous_answers.items():
-                        val_key = f'{q_key}_val'
-                        st.session_state[val_key] = answer_value
-                        print(f"[SESSION RESTORE] Forced {val_key} = {answer_value[:50]}...")
-                    
-                    # Populate feedback
-                    if previous_feedback:
-                        st.session_state['feedback'] = previous_feedback
-                        st.session_state['submitted'] = True
-                        print(f"[SESSION RESTORE] Forced feedback with keys: {list(previous_feedback.keys())}")
-                    
-                    # Populate conversation
-                    if latest_conversation_response:
-                        st.session_state['last_conversation_response'] = latest_conversation_response
-                        print(f"[SESSION RESTORE] Forced conversation response")
-                    
-                    # Mark this student/assignment as restored
-                    st.session_state[session_key] = True
-                else:
-                    print(f"[SESSION RESTORE] Already restored for {sid}/{aid} in this session")
+                
+                # Always update session state with latest data from Google Sheets
+                # This ensures refreshing the page loads the most recent submissions
+                print(f"[SESSION RESTORE] Updating session state with latest data from Google Sheets")
+                
+                # Populate answer values
+                for q_key, answer_value in previous_answers.items():
+                    val_key = f'{q_key}_val'
+                    st.session_state[val_key] = answer_value
+                    print(f"[SESSION RESTORE] Updated {val_key} = {answer_value[:50]}...")
+                
+                # Populate feedback
+                if previous_feedback:
+                    st.session_state['feedback'] = previous_feedback
+                    st.session_state['submitted'] = True
+                    print(f"[SESSION RESTORE] Updated feedback with keys: {list(previous_feedback.keys())}")
+                
+                # Populate conversation
+                if latest_conversation_response:
+                    st.session_state['last_conversation_response'] = latest_conversation_response
+                    print(f"[SESSION RESTORE] Updated conversation response")
         else:
             print(f"[SESSION] Assignment not started yet (started={started_status}) - loading fresh form")
         
@@ -2172,7 +2264,11 @@ def main() -> None:
             scores = []
             for q_key in active_questions.keys():
                 q_num = int(q_key.replace('q', ''))
-                score = float(fb.get(f'new_score{q_num}', fb.get(f'score{q_num}', 0)))
+                score_value = fb.get(f'new_score{q_num}', fb.get(f'score{q_num}', 0))
+                try:
+                    score = float(score_value) if score_value else 0
+                except (ValueError, TypeError):
+                    score = 0
                 scores.append(score)
             
             if all(score >= THRESHOLD_SCORE for score in scores):
